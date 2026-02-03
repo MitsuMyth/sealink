@@ -12,8 +12,8 @@ const skyVertexShader = `
 
 const skyFragmentShader = `
   varying vec3 vWorldPosition;
-  uniform vec3 uTopColor;
-  uniform vec3 uHorizonColor;
+  uniform vec3 uZenith;
+  uniform vec3 uHorizon;
   uniform vec3 uSunColor;
   uniform vec3 uSunDirection;
 
@@ -21,20 +21,20 @@ const skyFragmentShader = `
     vec3 dir = normalize(vWorldPosition);
     float y = dir.y;
 
-    // Sky gradient: horizon to zenith
-    float t = smoothstep(-0.05, 0.8, y);
-    vec3 sky = mix(uHorizonColor, uTopColor, t);
+    // Rich sky gradient
+    float t = smoothstep(-0.02, 0.85, y);
+    vec3 sky = mix(uHorizon, uZenith, t);
 
-    // Sun glow
+    // Sun
     float sunDot = max(dot(dir, uSunDirection), 0.0);
-    float sunDisc = pow(sunDot, 800.0) * 3.0;
-    float sunGlow = pow(sunDot, 8.0) * 0.4;
-    float sunHaze = pow(sunDot, 3.0) * 0.15;
+    float sunDisc = pow(sunDot, 1200.0) * 2.5;
+    float sunGlow = pow(sunDot, 12.0) * 0.2;
+    float sunHaze = pow(sunDot, 3.5) * 0.08;
     sky += uSunColor * (sunDisc + sunGlow + sunHaze);
 
-    // Warm horizon haze
-    float horizonHaze = 1.0 - smoothstep(0.0, 0.15, abs(y));
-    sky = mix(sky, uHorizonColor * 1.2, horizonHaze * 0.3);
+    // Warm band at horizon
+    float horizonBand = exp(-abs(y) * 12.0) * 0.15;
+    sky += vec3(0.9, 0.8, 0.65) * horizonBand;
 
     gl_FragColor = vec4(sky, 1.0);
   }
@@ -42,10 +42,10 @@ const skyFragmentShader = `
 
 export default function SkyDome() {
   const uniforms = useMemo(() => ({
-    uTopColor: { value: new THREE.Color('#3a8fd4') },
-    uHorizonColor: { value: new THREE.Color('#c8dff5') },
-    uSunColor: { value: new THREE.Color('#fff5e0') },
-    uSunDirection: { value: new THREE.Vector3(0.5, 0.6, 0.3).normalize() },
+    uZenith: { value: new THREE.Color('#4a90c4') },
+    uHorizon: { value: new THREE.Color('#b8d4e8') },
+    uSunColor: { value: new THREE.Color('#fff0d0') },
+    uSunDirection: { value: new THREE.Vector3(0.5, 0.55, 0.35).normalize() },
   }), []);
 
   return (

@@ -7,8 +7,17 @@ const vertexShader = `
   varying vec3 vWorldPosition;
   varying vec3 vNormal;
   varying vec2 vUv;
+  varying float vWaveHeight;
 
-  // Simplex-style noise helpers
+  vec3 gerstnerWave(vec2 pos, float steepness, float wavelength, float speed, vec2 direction, float time) {
+    float k = 6.28318 / wavelength;
+    float c = sqrt(9.81 / k);
+    vec2 d = normalize(direction);
+    float f = k * (dot(d, pos) - c * speed * time);
+    float a = steepness / k;
+    return vec3(d.x * a * cos(f), a * sin(f), d.y * a * cos(f));
+  }
+
   vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
   vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
   vec4 permute(vec4 x) { return mod289(((x * 34.0) + 1.0) * x); }
@@ -57,35 +66,55 @@ const vertexShader = `
     return 42.0 * dot(m*m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
   }
 
-  float getWaveHeight(vec3 pos, float time) {
-    float height = 0.0;
-    // Large slow swell
-    height += snoise(vec3(pos.x * 0.15, pos.z * 0.12, time * 0.3)) * 0.35;
-    // Medium waves
-    height += snoise(vec3(pos.x * 0.4 + time * 0.2, pos.z * 0.35, time * 0.5)) * 0.15;
-    // Small ripples
-    height += snoise(vec3(pos.x * 1.2 + time * 0.4, pos.z * 1.0, time * 0.8)) * 0.05;
-    // Micro detail
-    height += snoise(vec3(pos.x * 3.0 + time * 0.6, pos.z * 2.8, time * 1.2)) * 0.02;
-    return height;
+  // Sum all Gerstner waves at a given position
+  vec3 totalWave(vec2 p, float t) {
+    vec3 w = vec3(0.0);
+    w += gerstnerWave(p, 0.20, 9.0,  0.7, vec2(1.0, 0.2),   t);
+    w += gerstnerWave(p, 0.16, 7.0,  0.6, vec2(0.6, 0.8),   t);
+    w += gerstnerWave(p, 0.11, 4.5,  0.85, vec2(-0.3, 1.0),  t);
+    w += gerstnerWave(p, 0.08, 2.8,  1.0, vec2(0.85, -0.3), t);
+    w += gerstnerWave(p, 0.05, 1.6,  1.2, vec2(-0.5, 0.7),  t);
+    w += gerstnerWave(p, 0.03, 0.9,  1.5, vec2(0.4, -0.85), t);
+    w += gerstnerWave(p, 0.015, 0.45, 1.8, vec2(-0.7, -0.4), t);
+    return w;
   }
 
   void main() {
     vUv = uv;
     vec3 pos = position;
+    vec2 xz = pos.xy;
+    float t = uTime;
 
-    float h = getWaveHeight(pos, uTime);
-    pos.y += h;
+    vec3 wave = totalWave(xz, t);
 
-    // Compute normal via finite differences
-    float eps = 0.05;
-    float hx = getWaveHeight(pos + vec3(eps, 0.0, 0.0), uTime) - getWaveHeight(pos - vec3(eps, 0.0, 0.0), uTime);
-    float hz = getWaveHeight(pos + vec3(0.0, 0.0, eps), uTime) - getWaveHeight(pos - vec3(0.0, 0.0, eps), uTime);
-    vec3 computedNormal = normalize(vec3(-hx / (2.0 * eps), 1.0, -hz / (2.0 * eps)));
+    // Organic micro-detail
+    float nd = 0.0;
+    nd += snoise(vec3(xz * 0.7, t * 0.25)) * 0.03;
+    nd += snoise(vec3(xz * 1.8, t * 0.4))  * 0.012;
+    nd += snoise(vec3(xz * 4.5, t * 0.7))  * 0.004;
+
+    pos.x += wave.x;
+    pos.y += wave.z + nd;
+
+    vWaveHeight = wave.y + wave.z;
+
+    // Normal via finite differences on the 4 major wave layers
+    float eps = 0.06;
+    vec3 w1 = totalWave(xz + vec2(eps, 0.0), t);
+    vec3 w2 = totalWave(xz - vec2(eps, 0.0), t);
+    vec3 w3 = totalWave(xz + vec2(0.0, eps), t);
+    vec3 w4 = totalWave(xz - vec2(0.0, eps), t);
+
+    // Add noise perturbation to normals for micro-shimmer
+    float nx = snoise(vec3(xz * 6.0 + t * 0.3, 0.0)) * 0.06;
+    float nz = snoise(vec3(0.0, xz * 6.0 + t * 0.35)) * 0.06;
+
+    float hx = (w1.y + w1.z) - (w2.y + w2.z);
+    float hz = (w3.y + w3.z) - (w4.y + w4.z);
+    vec3 computedNormal = normalize(vec3(-hx / (2.0 * eps) + nx, 1.0, -hz / (2.0 * eps) + nz));
 
     vNormal = normalize(normalMatrix * computedNormal);
     vWorldPosition = (modelMatrix * vec4(pos, 1.0)).xyz;
-
     gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
   }
 `;
@@ -95,53 +124,73 @@ const fragmentShader = `
   uniform vec3 uSunDirection;
   uniform vec3 uSunColor;
   uniform vec3 uWaterDeep;
+  uniform vec3 uWaterMid;
   uniform vec3 uWaterShallow;
-  uniform vec3 uSkyColor;
+  uniform vec3 uSkyZenith;
+  uniform vec3 uSkyHorizon;
   varying vec3 vWorldPosition;
   varying vec3 vNormal;
   varying vec2 vUv;
+  varying float vWaveHeight;
 
   void main() {
-    vec3 viewDir = normalize(cameraPosition - vWorldPosition);
-    vec3 normal = normalize(vNormal);
+    vec3 V = normalize(cameraPosition - vWorldPosition);
+    vec3 N = normalize(vNormal);
+    vec3 L = normalize(uSunDirection);
 
-    // Fresnel effect — more reflection at grazing angles
-    float fresnel = pow(1.0 - max(dot(viewDir, normal), 0.0), 4.0);
-    fresnel = clamp(fresnel, 0.05, 0.95);
+    // ── Fresnel (Schlick, water IOR 1.33 → F0 ≈ 0.02) ──
+    float NdotV = max(dot(N, V), 0.0);
+    float fresnel = 0.02 + 0.98 * pow(1.0 - NdotV, 5.0);
+    // Clamp fresnel so it never goes fully white
+    fresnel = min(fresnel, 0.65);
 
-    // Water color blending based on depth/angle
-    float depthFactor = smoothstep(-0.5, 0.3, vWorldPosition.y);
-    vec3 waterColor = mix(uWaterDeep, uWaterShallow, depthFactor);
+    // ── Water body color (3-stop gradient by height) ──
+    float d1 = smoothstep(-0.5, 0.1, vWorldPosition.y);
+    float d2 = smoothstep(0.05, 0.35, vWorldPosition.y);
+    vec3 waterColor = mix(uWaterDeep, uWaterMid, d1);
+    waterColor = mix(waterColor, uWaterShallow, d2 * 0.5);
 
-    // Specular sun reflection
-    vec3 halfDir = normalize(uSunDirection + viewDir);
-    float specular = pow(max(dot(normal, halfDir), 0.0), 256.0);
-    float specularBroad = pow(max(dot(normal, halfDir), 0.0), 32.0);
+    // ── Sub-surface scattering ──
+    // Light transmitting through wave crests gives that iconic teal glow
+    vec3 sssDir = normalize(-L + N * 0.35);
+    float sssDot = pow(max(dot(V, sssDir), 0.0), 4.0);
+    float crestMask = smoothstep(-0.05, 0.25, vWaveHeight);
+    vec3 sssColor = vec3(0.0, 0.35, 0.3) * sssDot * (0.15 + crestMask * 0.25);
 
-    // Sub-surface scattering approximation
-    float sss = pow(max(dot(viewDir, -uSunDirection + normal * 0.3), 0.0), 3.0) * 0.15;
-    vec3 sssColor = vec3(0.0, 0.6, 0.5) * sss;
+    // ── Sky reflection (gradient, not flat white) ──
+    vec3 R = reflect(-V, N);
+    float skyT = smoothstep(-0.05, 0.7, R.y);
+    vec3 skyRef = mix(uSkyHorizon, uSkyZenith, skyT);
+    // Darken sky reflection to prevent white washing
+    skyRef *= 0.85;
 
-    // Sky reflection
-    vec3 reflectDir = reflect(-viewDir, normal);
-    float skyGradient = smoothstep(-0.1, 0.5, reflectDir.y);
-    vec3 skyReflection = mix(vec3(0.6, 0.75, 0.85), uSkyColor, skyGradient);
+    // ── Combine via Fresnel ──
+    vec3 color = mix(waterColor + sssColor, skyRef, fresnel);
 
-    // Combine
-    vec3 color = mix(waterColor + sssColor, skyReflection, fresnel);
-    color += uSunColor * specular * 1.5;
-    color += uSunColor * specularBroad * 0.08;
+    // ── Specular sun highlight (concentrated, not broad) ──
+    vec3 H = normalize(L + V);
+    float NdotH = max(dot(N, H), 0.0);
+    // Tight sun disc only
+    float specSun = pow(NdotH, 800.0) * 3.0;
+    // Very subtle broad glint
+    float specGlint = pow(NdotH, 80.0) * 0.04;
+    color += uSunColor * (specSun + specGlint);
 
-    // Slight fog / atmospheric perspective
+    // ── Atmospheric depth fade (into horizon color, NOT white) ──
     float dist = length(cameraPosition - vWorldPosition);
-    float fogFactor = 1.0 - exp(-dist * 0.02);
-    color = mix(color, uSkyColor * 0.9, fogFactor * 0.3);
+    float fog = 1.0 - exp(-dist * 0.015);
+    color = mix(color, uSkyHorizon * 0.75, fog * 0.3);
 
-    // Tone mapping
-    color = color / (color + vec3(1.0));
-    color = pow(color, vec3(1.0 / 2.2));
+    // ── ACES filmic tone mapping ──
+    color *= 1.1; // slight exposure boost
+    vec3 a = color * (color + 0.0245786) - 0.000090537;
+    vec3 b = color * (0.983729 * color + 0.4329510) + 0.238081;
+    color = a / b;
 
-    gl_FragColor = vec4(color, 0.95);
+    // Gamma
+    color = pow(clamp(color, 0.0, 1.0), vec3(1.0 / 2.2));
+
+    gl_FragColor = vec4(color, 1.0);
   }
 `;
 
@@ -150,26 +199,27 @@ export default function WaterScene() {
 
   const uniforms = useMemo(() => ({
     uTime: { value: 0 },
-    uSunDirection: { value: new THREE.Vector3(0.5, 0.6, 0.3).normalize() },
-    uSunColor: { value: new THREE.Color('#fff5e6') },
-    uWaterDeep: { value: new THREE.Color('#0a2e5c') },
-    uWaterShallow: { value: new THREE.Color('#0e7490') },
-    uSkyColor: { value: new THREE.Color('#87ceeb') },
+    uSunDirection: { value: new THREE.Vector3(0.5, 0.55, 0.35).normalize() },
+    uSunColor: { value: new THREE.Color('#ffefd5') },
+    uWaterDeep: { value: new THREE.Color('#04152e') },
+    uWaterMid: { value: new THREE.Color('#0a3d62') },
+    uWaterShallow: { value: new THREE.Color('#0c6980') },
+    uSkyZenith: { value: new THREE.Color('#5b9fd4') },
+    uSkyHorizon: { value: new THREE.Color('#8cb8d4') },
   }), []);
 
   useFrame(({ clock }) => {
-    uniforms.uTime.value = clock.getElapsedTime() * 0.6;
+    uniforms.uTime.value = clock.getElapsedTime() * 0.45;
   });
 
   return (
     <mesh ref={meshRef} rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.3, 0]}>
-      <planeGeometry args={[30, 30, 200, 200]} />
+      <planeGeometry args={[40, 40, 280, 280]} />
       <shaderMaterial
         vertexShader={vertexShader}
         fragmentShader={fragmentShader}
         uniforms={uniforms}
-        transparent
-        side={THREE.DoubleSide}
+        side={THREE.FrontSide}
       />
     </mesh>
   );
